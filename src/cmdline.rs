@@ -84,6 +84,7 @@ pub enum Command {
         /// The environment variables to use for execution.
         env_vars: Vec<(OsString, OsString)>,
     },
+    DebugManifests,
 }
 
 fn flag_infer_long_and_short(name: &'static str) -> Arg {
@@ -127,6 +128,9 @@ fn get_clap_command() -> clap::Command {
             flag_infer_long("start-server")
                 .help("start background server")
                 .action(ArgAction::SetTrue),
+            flag_infer_long("debug-manifests")
+                .help("show all manifests")
+                .action(ArgAction::SetTrue),
             flag_infer_long("stop-server")
                 .help("stop background server")
                 .action(ArgAction::SetTrue),
@@ -158,6 +162,7 @@ fn get_clap_command() -> clap::Command {
             ArgGroup::new("one_and_only_one")
                 .args([
                     "dist-auth",
+                    "debug-manifests",
                     "dist-status",
                     "show-stats",
                     "start-server",
@@ -249,6 +254,8 @@ pub fn try_parse() -> Result<Command> {
                 Ok(Command::ShowStats(fmt))
             } else if matches.get_flag("start-server") {
                 Ok(Command::StartServer)
+            } else if matches.get_flag("debug-manifests") {
+                Ok(Command::DebugManifests)
             } else if matches.get_flag("stop-server") {
                 Ok(Command::StopServer)
             } else if matches.get_flag("zero-stats") {

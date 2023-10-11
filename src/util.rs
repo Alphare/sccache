@@ -34,6 +34,8 @@ use crate::errors::*;
 pub const BASE64_URL_SAFE_ENGINE: base64::engine::GeneralPurpose =
     base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+pub const HASH_BUFFER_SIZE: usize = 128 * 1024;
+
 #[derive(Clone)]
 pub struct Digest {
     inner: blake3_Hasher,
@@ -56,19 +58,38 @@ impl Digest {
     }
 
     /// Calculate the BLAKE3 digest of the contents read from `reader`.
-    pub fn reader_sync<R: Read>(mut reader: R) -> Result<String> {
+    pub fn reader_sync<R: Read>(reader: R) -> Result<String> {
+        Self::reader_sync_with(reader, |_| {}).map(|d| d.finish())
+    }
+
+    /// Calculate the BLAKE3 digest of the contents read from `reader`, calling
+    /// `each` before each time the digest is updated.
+    pub fn reader_sync_with<R: Read, F: FnMut(&[u8])>(mut reader: R, mut each: F) -> Result<Self> {
         let mut m = Digest::new();
         // A buffer of 128KB should give us the best performance.
         // See https://eklitzke.org/efficient-file-copying-on-linux.
-        let mut buffer = [0; 128 * 1024];
+        let mut buffer = [0; HASH_BUFFER_SIZE];
         loop {
             let count = reader.read(&mut buffer[..])?;
             if count == 0 {
                 break;
             }
+            each(&buffer[..count]);
             m.update(&buffer[..count]);
         }
-        Ok(m.finish())
+        Ok(m)
+    }
+
+    /// Calculate the BLAKE3 digest of the contents read from `reader`, while
+    /// also checking for the presence of time macros.
+    /// See [`TimeMacroFinder`] for more details.
+    pub fn reader_sync_time_macros<R: Read>(reader: R) -> Result<(String, TimeMacroFinder)> {
+        let mut finder = TimeMacroFinder::new();
+
+        Ok((
+            Self::reader_sync_with(reader, |visit| finder.find_time_macros(visit))?.finish(),
+            finder,
+        ))
     }
 
     /// Calculate the BLAKE3 digest of the contents of `path`, running
@@ -94,6 +115,125 @@ impl Digest {
 impl Default for Digest {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The longest pattern we're looking for is `__TIMESTAMP__`
+const MAX_HAYSTACK_LEN: usize = b"__TIMESTAMP__".len();
+
+#[cfg(test)]
+pub const MAX_TIME_MACRO_HAYSTACK_LEN: usize = MAX_HAYSTACK_LEN;
+
+/// Used during the chunked hashing process to check for C preprocessor time
+/// macros (namely `__TIMESTAMP__`, `__DATE__`, `__DATETIME__`) while reusing
+/// the same buffer as the hashing function, for efficiency.
+///
+/// See `[Self::find_time_macros]` for details.
+#[derive(Debug, Default)]
+pub struct TimeMacroFinder {
+    pub found_date: bool,
+    pub found_time: bool,
+    pub found_timestamp: bool,
+    overlap_buffer: [u8; MAX_HAYSTACK_LEN * 2],
+    counter: usize,
+}
+
+impl TimeMacroFinder {
+    /// Called for each chunk of a file during the hashing process in direct mode.
+    ///
+    /// When buffer reading a file, we get something like this:
+    ///
+    /// `[xxxx....aaaa][bbbb....cccc][dddd....eeee][ffff...]`
+    ///
+    /// The brackets represent each buffer chunk. We use the fact that the largest
+    /// pattern we're looking for is `__TIMESTAMP__` to avoid copying the entire
+    /// file to memory and re-searching the entire buffer for each pattern.
+    /// We can check inside each chunk for each pattern, and we use an overlap
+    /// buffer to keep the last `b"__TIMESTAMP__".len()` bytes around from the
+    /// last chunk, to also catch any pattern overlapping two chunks.
+    ///
+    /// In the above case, the overflow buffer would look like:
+    ///
+    /// ```text
+    ///    Chunk 1
+    ///    - aaaa0000
+    ///    Chunk 2
+    ///    - aaaabbbb
+    ///    - cccc0000
+    ///    Chunk 3
+    ///    - ccccdddd
+    ///    - eeee0000
+    ///    Chunk 4
+    ///    - eeeeffff
+    ///    [...]
+    /// ```
+    ///
+    /// We have to be careful to zero out the buffer right after each overlap check,
+    /// otherwise we risk the (unlikely) case of a pattern being spread between the
+    /// start of a chunk and its end.
+    /// There is also the edge case of the chunk (or even the entire file) being
+    /// smaller than a pattern to look for.
+    pub fn find_time_macros(&mut self, visit: &[u8]) {
+        if self.counter == 0 {
+            if visit.len() <= MAX_HAYSTACK_LEN {
+                // the file is smaller than the largest haystack
+                self.find_macros(visit);
+                self.counter += 1;
+                return;
+            }
+            // Copy the right side of the visit to the left of the buffer
+            let right_half = visit.len() - MAX_HAYSTACK_LEN;
+            self.overlap_buffer[..MAX_HAYSTACK_LEN].copy_from_slice(&visit[right_half..]);
+        } else {
+            if visit.len() < MAX_HAYSTACK_LEN {
+                // zero the right side of the buffer
+                self.overlap_buffer[MAX_HAYSTACK_LEN..].copy_from_slice(&[0; MAX_HAYSTACK_LEN]);
+                // Copy the visit to the right of the buffer, starting from the middle
+                self.overlap_buffer[MAX_HAYSTACK_LEN..MAX_HAYSTACK_LEN + visit.len()]
+                    .copy_from_slice(visit);
+            } else {
+                // Copy the left side of the visit to the right of the buffer
+                let left_half = MAX_HAYSTACK_LEN;
+                self.overlap_buffer[left_half..].copy_from_slice(&visit[..left_half]);
+                self.find_macros(&self.overlap_buffer.clone());
+                // zero the buffer
+                self.overlap_buffer = Default::default();
+                // Copy the right side of the visit to the left of the buffer
+                let right_half = visit.len() - MAX_HAYSTACK_LEN;
+                self.overlap_buffer[..MAX_HAYSTACK_LEN].copy_from_slice(&visit[right_half..]);
+            }
+            self.find_macros(&self.overlap_buffer.clone());
+        }
+
+        self.find_macros(visit);
+        self.counter += 1;
+    }
+
+    fn find_macros(&mut self, buffer: &[u8]) {
+        // TODO
+        // This could be made more efficient, either by using a regex for all
+        // three patterns, or by doing some SIMD trickery like `ccache` does.
+        //
+        // `ccache` reads the file twice, so we might actually already be
+        // winning in most cases... though they have an inode cache.
+        // In any case, let's only improve this if it ends up being slow.
+        if memchr::memmem::find(buffer, b"__TIMESTAMP__").is_some() {
+            self.found_timestamp = true;
+        }
+        if memchr::memmem::find(buffer, b"__TIME__").is_some() {
+            self.found_time = true;
+        };
+        if memchr::memmem::find(buffer, b"__DATE__").is_some() {
+            self.found_date = true;
+        };
+    }
+
+    pub fn found_time_macros(&self) -> bool {
+        self.found_date || self.found_time || self.found_timestamp
+    }
+
+    pub fn new() -> Self {
+        Default::default()
     }
 }
 

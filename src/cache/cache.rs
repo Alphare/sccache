@@ -405,6 +405,11 @@ pub struct DirectModeConfig {
     /// If true, direct mode will not cache system headers, only add them to the
     /// hash.
     pub skip_system_headers: bool,
+    /// If true, we will look for a `.sum` file when we detect a precompiled
+    /// header and use this for the hash to avoid computing the hash of a
+    /// large header every time.
+    /// TODO but I'm not sure we actually have pch support?
+    pub pch_external_checksum: bool,
     /// If true (default), will add the current working directory in the hash to
     /// distinguish two compilations from different directories.
     pub hash_working_directory: bool,
@@ -418,6 +423,7 @@ impl Default for DirectModeConfig {
             use_ctime_for_stat: true,
             ignore_time_macros: false,
             skip_system_headers: false,
+            pch_external_checksum: false,
             hash_working_directory: true,
         }
     }

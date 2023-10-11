@@ -473,6 +473,8 @@ where
         // Remember include files needed in this preprocessing step
         let mut include_files = HashMap::new();
         if manifest_key.is_some() {
+            // TODO where to get it from? Is it even supported?
+            let precompiled_header_in_args = false;
 
             // TODO how to propagate stats and which stats?
             if !process_preprocessed_file(
@@ -481,6 +483,7 @@ where
                 &mut preprocessor_result.stdout,
                 &mut include_files,
                 direct_mode_config,
+                precompiled_header_in_args,
                 start_of_compilation,
             )? {
                 debug!("Disabling direct mode");
@@ -571,6 +574,7 @@ fn process_preprocessed_file(
     bytes: &mut Vec<u8>,
     included_files: &mut HashMap<PathBuf, String>,
     config: DirectModeConfig,
+    precompiled_header_in_args: bool,
     time_of_compilation: std::time::SystemTime,
 ) -> Result<bool> {
     let mut start = 0;
@@ -712,6 +716,7 @@ fn process_preprocessed_file(
                 &mut digest,
                 system,
                 config,
+                precompiled_header_in_args,
                 time_of_compilation,
             )? {
                 return Ok(false);
@@ -752,6 +757,15 @@ fn process_preprocessed_file(
     }
     digest.update(&bytes[hash_start..]);
 
+    // TODO
+    // Explicitly check the .gch/.pch/.pth file as Clang does not include any
+    // mention of it in the preprocessed output.
+    // if (!ctx.args_info.included_pch_file.empty()) {
+    //     std::string pch_path =
+    //     Util::make_relative_path(ctx, ctx.args_info.included_pch_file);
+    //     hash.hash(pch_path);
+    //     remember_include_file(ctx, pch_path, hash, false, nullptr);
+    // }
 
     Ok(true)
 }
@@ -801,6 +815,7 @@ fn remember_include_file(
     digest: &mut Digest,
     system: bool,
     config: DirectModeConfig,
+    precompiled_header_in_args: bool,
     time_of_compilation: std::time::SystemTime,
 ) -> Result<bool> {
     // TODO if precompiled header.
@@ -856,6 +871,17 @@ fn remember_include_file(
     }
 
     // TODO add an option to ignore some header files?
+
+    let extension = path.extension();
+    let is_pch_file = extension
+        .map(|ext| ext == "gch" || ext == "pch" || ext == "pth")
+        .unwrap_or(false);
+    let is_in_pch_dir = path
+        .parent()
+        .and_then(|parent| parent.extension().map(|e| e == "gch"))
+        .unwrap_or(false);
+
+    let is_precompiled_header = is_pch_file || is_in_pch_dir;
     if include_is_too_new(&path, &meta, time_of_compilation) {
         // Opt out of direct mode because of a race condition.
         //
@@ -871,36 +897,81 @@ fn remember_include_file(
     }
 
     // Let's hash the include file content.
-    let file = match fs::File::open(&path) {
-        Ok(file) => file,
-        Err(e) => {
-            debug!("Failed to open header file {}: {}", path.display(), e);
+    let file_digest = if is_precompiled_header {
+        let mut using_pch_sum = false;
+        if !precompiled_header_in_args {
+            debug!("Detected use of precompiled header: {}", path.display())
+        }
+
+        if config.pch_external_checksum {
+            // hash pch.sum instead of pch when it exists
+            // to prevent hashing a very large .pch file every time
+            let mut pch_sum_path = path.clone();
+            pch_sum_path.set_extension(
+                extension
+                    .map(|e| {
+                        let mut e = e.to_os_string();
+                        e.push(".sum");
+                        e
+                    })
+                    .unwrap_or_else(|| "sum".into()),
+            );
+            if let Ok(sum_metadata) = fs::symlink_metadata(&path) {
+                if sum_metadata.is_file() {
+                    path = pch_sum_path;
+                    using_pch_sum = true;
+                    debug!("Using PCH .sum file {}", path.display());
+                }
+            }
+        }
+
+        let Ok(file) = fs::File::open(&path) else {
+            return Ok(false);
+        };
+        let Ok(file_digest) = Digest::reader_sync_with(file, |_| {}) else {
+            return Ok(false);
+        };
+        digest.delimiter(if using_pch_sum {
+            b"pch_sum_hash"
+        } else {
+            b"pch_hash"
+        });
+        digest.update(file_digest.clone().finish().as_bytes());
+
+        file_digest.finish()
+    } else {
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(e) => {
+                debug!("Failed to open header file {}: {}", path.display(), e);
+                return Ok(false);
+            }
+        };
+
+        let (file_digest, finder) = if config.ignore_time_macros {
+            match Digest::reader_sync(file) {
+                Ok(file_digest) => (file_digest, TimeMacroFinder::new()),
+                Err(e) => {
+                    debug!("Failed to read header file {}: {}", path.display(), e);
+                    return Ok(false);
+                }
+            }
+        } else {
+            match Digest::reader_sync_time_macros(file) {
+                Ok((file_digest, finder)) => (file_digest, finder),
+                Err(e) => {
+                    debug!("Failed to read header file {}: {}", path.display(), e);
+                    return Ok(false);
+                }
+            }
+        };
+
+        if finder.found_time {
+            debug!("Found __TIME__ in header file {}", path.display());
             return Ok(false);
         }
+        file_digest
     };
-
-    let (file_digest, finder) = if config.ignore_time_macros {
-        match Digest::reader_sync(file) {
-            Ok(file_digest) => (file_digest, TimeMacroFinder::new()),
-            Err(e) => {
-                debug!("Failed to read header file {}: {}", path.display(), e);
-                return Ok(false);
-            }
-        }
-    } else {
-        match Digest::reader_sync_time_macros(file) {
-            Ok((file_digest, finder)) => (file_digest, finder),
-            Err(e) => {
-                debug!("Failed to read header file {}: {}", path.display(), e);
-                return Ok(false);
-            }
-        }
-    };
-
-    if finder.found_time {
-        debug!("Found __TIME__ in header file {}", path.display());
-        return Ok(false);
-    }
 
     included_files.insert(path, file_digest);
 
@@ -1450,6 +1521,7 @@ mod test {
             &mut bytes,
             &mut include_files,
             config,
+            false,
             std::time::SystemTime::now(),
         )
         .unwrap();

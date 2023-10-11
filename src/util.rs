@@ -107,6 +107,12 @@ impl Digest {
         self.inner.update(bytes);
     }
 
+    pub fn delimiter(&mut self, name: &[u8]) {
+        self.update(b"\0SCCACHE\0");
+        self.update(name);
+        self.update(b"\0");
+    }
+
     pub fn finish(self) -> String {
         hex(self.inner.finalize().as_bytes())
     }

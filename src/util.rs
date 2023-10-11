@@ -107,6 +107,12 @@ impl Digest {
         self.inner.update(bytes);
     }
 
+    pub fn delimiter(&mut self, name: &[u8]) {
+        self.update(b"\0SCCACHE\0");
+        self.update(name);
+        self.update(b"\0");
+    }
+
     pub fn finish(self) -> String {
         hex(self.inner.finalize().as_bytes())
     }
@@ -724,7 +730,6 @@ pub struct Timestamp {
 const NSEC_PER_SEC: u32 = 1_000_000_000;
 
 impl From<std::time::SystemTime> for Timestamp {
-    #[cfg(unix)]
     fn from(system_time: std::time::SystemTime) -> Self {
         // On Unix, `SystemTime` is a wrapper for the `timespec` C struct:
         // https://www.gnu.org/software/libc/manual/html_node/Time-Types.html#index-struct-timespec
@@ -919,7 +924,7 @@ pub fn new_reqwest_blocking_client() -> reqwest::blocking::Client {
 
 #[cfg(test)]
 mod tests {
-    use super::OsStrExt;
+    use super::{OsStrExt, TimeMacroFinder};
     use std::ffi::{OsStr, OsString};
 
     #[test]
@@ -947,5 +952,84 @@ mod tests {
         assert_eq!(a.split_prefix("foo"), Some(OsString::from("")));
         assert_eq!(a.split_prefix("foo2"), None);
         assert_eq!(a.split_prefix("b"), None);
+    }
+
+    #[test]
+    fn test_time_macro_short_read() {
+        // Normal "read" should succeed
+        let mut finder = TimeMacroFinder::new();
+        finder.find_time_macros(b"__TIME__");
+        assert!(finder.found_time);
+
+        // So should a partial "read"
+        let mut finder = TimeMacroFinder::new();
+        finder.find_time_macros(b"__");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"TIME__");
+        assert!(finder.found_time);
+
+        // So should a partial "read" later down the line
+        let mut finder = TimeMacroFinder::new();
+        finder.find_time_macros(b"Something or other larger than the haystack");
+        finder.find_time_macros(b"__");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"TIME__");
+        assert!(finder.found_time);
+
+        // Even if the last "read" is large
+        let mut finder = TimeMacroFinder::new();
+        finder.find_time_macros(b"Something or other larger than the haystack");
+        finder.find_time_macros(b"__");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"TIME__ something or other larger than the haystack");
+        assert!(finder.found_time);
+
+        // Pathological case
+        let mut finder = TimeMacroFinder::new();
+        finder.find_time_macros(b"__");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"TI");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"ME");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"__");
+        assert!(finder.found_time);
+
+        // Odd-numbered pathological case
+        let mut finder = TimeMacroFinder::new();
+        finder.find_time_macros(b"This is larger than the haystack __");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"TI");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"ME");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"__");
+        assert!(finder.found_time);
+
+        // Sawtooth length pathological case
+        let mut finder = TimeMacroFinder::new();
+        finder.find_time_macros(b"This is larger than the haystack __");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"TI");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"ME__ This is larger than the haystack");
+        assert!(finder.found_time);
+        assert!(!finder.found_timestamp);
+        finder.find_time_macros(b"__");
+        assert!(!finder.found_timestamp);
+        finder.find_time_macros(b"TIMESTAMP__ This is larger than the haystack");
+        assert!(finder.found_timestamp);
+
+        // Odd-numbered sawtooth length pathological case
+        let mut finder = TimeMacroFinder::new();
+        finder.find_time_macros(b"__");
+        assert!(!finder.found_time);
+        finder.find_time_macros(b"TIME__ This is larger than the haystack");
+        assert!(finder.found_time);
+        assert!(!finder.found_timestamp);
+        finder.find_time_macros(b"__");
+        assert!(!finder.found_timestamp);
+        finder.find_time_macros(b"TIMESTAMP__ This is larger than the haystack");
+        assert!(finder.found_timestamp);
     }
 }

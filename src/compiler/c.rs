@@ -180,6 +180,7 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         env_vars: &[(OsString, OsString)],
         may_dist: bool,
         rewrite_includes_only: bool,
+        direct_mode: bool,
     ) -> Result<process::Output>
     where
         T: CommandCreatorSync;
@@ -372,6 +373,7 @@ where
                 &env_vars,
                 may_dist,
                 rewrite_includes_only,
+                direct_mode_config.use_direct_mode,
             )
             .await;
         let out_pretty = parsed_args.output_pretty().into_owned();

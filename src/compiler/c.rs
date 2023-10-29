@@ -961,7 +961,7 @@ fn remember_include_file(
         }
     };
 
-    if finder.found_time {
+    if finder.found_time.get() {
         debug!("Found __TIME__ in header file {}", path.display());
         return Ok(false);
     }

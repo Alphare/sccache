@@ -281,7 +281,7 @@ impl PreprocessorCacheEntry {
                 if !finder.found_time_macros() && include.digest != new_digest {
                     return false;
                 }
-                if finder.found_time {
+                if finder.found_time.get() {
                     // We don't know for sure that the program actually uses the __TIME__ macro,
                     // but we have to assume it anyway and hash the time stamp. However, that's
                     // not very useful since the chance that we get a cache hit later the same
@@ -298,7 +298,7 @@ impl PreprocessorCacheEntry {
                 let mut new_digest = Digest::new();
                 new_digest.update(digest.as_bytes());
 
-                if finder.found_date {
+                if finder.found_date.get() {
                     debug!("found __DATE__ in {}", path.display());
                     new_digest.delimiter(b"date");
                     let date = chrono::Local::now().date_naive();
@@ -315,7 +315,7 @@ impl PreprocessorCacheEntry {
                     }
                 }
 
-                if finder.found_timestamp {
+                if finder.found_timestamp.get() {
                     debug!("found __TIMESTAMP__ in {}", path.display());
                     let meta = match std::fs::symlink_metadata(path) {
                         Ok(meta) => meta,
@@ -422,7 +422,7 @@ pub fn preprocessor_cache_entry_hash_key(
         Digest::reader_sync(reader)?
     } else {
         let (digest, finder) = Digest::reader_sync_time_macros(reader)?;
-        if finder.found_time {
+        if finder.found_time.get() {
             // Disable preprocessor cache mode
             debug!("Found __TIME__ in {}", input_file.display());
             return Ok(None);
@@ -508,21 +508,21 @@ mod test {
         let buf = b"__TIME__";
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(finder.found_time_macros());
-        assert!(finder.found_time);
-        assert!(!finder.found_timestamp);
-        assert!(!finder.found_date);
+        assert!(finder.found_time.get());
+        assert!(!finder.found_timestamp.get());
+        assert!(!finder.found_date.get());
         let buf = b"__DATE__";
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(finder.found_time_macros());
-        assert!(!finder.found_time);
-        assert!(!finder.found_timestamp);
-        assert!(finder.found_date);
+        assert!(!finder.found_time.get());
+        assert!(!finder.found_timestamp.get());
+        assert!(finder.found_date.get());
         let buf = b"__TIMESTAMP__";
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(finder.found_time_macros());
-        assert!(!finder.found_time);
-        assert!(finder.found_timestamp);
-        assert!(!finder.found_date);
+        assert!(!finder.found_time.get());
+        assert!(finder.found_timestamp.get());
+        assert!(!finder.found_date.get());
     }
 
     #[test]
@@ -530,9 +530,9 @@ mod test {
         let buf = b"__TIMESTAMP____DATE____TIME__";
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(finder.found_time_macros());
-        assert!(finder.found_time);
-        assert!(finder.found_timestamp);
-        assert!(finder.found_date);
+        assert!(finder.found_time.get());
+        assert!(finder.found_timestamp.get());
+        assert!(finder.found_date.get());
     }
 
     #[test]
@@ -540,9 +540,9 @@ mod test {
         let buf = vec![0; HASH_BUFFER_SIZE * 2];
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(!finder.found_time_macros());
-        assert!(!finder.found_time);
-        assert!(!finder.found_timestamp);
-        assert!(!finder.found_date);
+        assert!(!finder.found_time.get());
+        assert!(!finder.found_timestamp.get());
+        assert!(!finder.found_date.get());
     }
 
     #[test]
@@ -551,9 +551,9 @@ mod test {
         buf.extend(b"__TIMESTAMP____DATE____TIME__");
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(finder.found_time_macros());
-        assert!(finder.found_time);
-        assert!(finder.found_timestamp);
-        assert!(finder.found_date);
+        assert!(finder.found_time.get());
+        assert!(finder.found_timestamp.get());
+        assert!(finder.found_date.get());
     }
     #[test]
     fn test_find_time_macros_large_file_match_overlap() {
@@ -563,9 +563,9 @@ mod test {
         buf[start..][..b"__TIMESTAMP__".len()].copy_from_slice(b"__TIMESTAMP__");
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(finder.found_time_macros());
-        assert!(!finder.found_time);
-        assert!(finder.found_timestamp);
-        assert!(!finder.found_date);
+        assert!(!finder.found_time.get());
+        assert!(finder.found_timestamp.get());
+        assert!(!finder.found_date.get());
 
         let mut buf = vec![0; HASH_BUFFER_SIZE * 2];
         // Make the pattern overlap two buffer chunks to make sure we account for this
@@ -573,9 +573,9 @@ mod test {
         buf[start..][..b"__TIME__".len()].copy_from_slice(b"__TIME__");
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(finder.found_time_macros());
-        assert!(finder.found_time);
-        assert!(!finder.found_timestamp);
-        assert!(!finder.found_date);
+        assert!(finder.found_time.get());
+        assert!(!finder.found_timestamp.get());
+        assert!(!finder.found_date.get());
 
         let mut buf = vec![0; HASH_BUFFER_SIZE * 2];
         // Make the pattern overlap two buffer chunks to make sure we account for this
@@ -583,9 +583,9 @@ mod test {
         buf[start..][..b"__DATE__".len()].copy_from_slice(b"__DATE__");
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(finder.found_time_macros());
-        assert!(!finder.found_time);
-        assert!(!finder.found_timestamp);
-        assert!(finder.found_date);
+        assert!(!finder.found_time.get());
+        assert!(!finder.found_timestamp.get());
+        assert!(finder.found_date.get());
     }
 
     #[test]
@@ -598,9 +598,9 @@ mod test {
         buf[start..][..b"__DATE__".len()].copy_from_slice(b"__DATE__");
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(finder.found_time_macros());
-        assert!(finder.found_time);
-        assert!(!finder.found_timestamp);
-        assert!(finder.found_date);
+        assert!(finder.found_time.get());
+        assert!(!finder.found_timestamp.get());
+        assert!(finder.found_date.get());
     }
 
     #[test]
@@ -617,9 +617,9 @@ mod test {
         buf[start..][..b"__TIMESTAMP__".len()].copy_from_slice(b"__TIMESTAMP__");
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(finder.found_time_macros());
-        assert!(finder.found_time);
-        assert!(finder.found_timestamp);
-        assert!(finder.found_date);
+        assert!(finder.found_time.get());
+        assert!(finder.found_timestamp.get());
+        assert!(finder.found_date.get());
     }
 
     #[test]
@@ -631,8 +631,8 @@ mod test {
         buf[HASH_BUFFER_SIZE * 2 - "ME__".len()..HASH_BUFFER_SIZE * 2].copy_from_slice(b"ME__");
         let finder = Digest::reader_sync_time_macros(buf.as_slice()).unwrap().1;
         assert!(!finder.found_time_macros());
-        assert!(!finder.found_time);
-        assert!(!finder.found_timestamp);
-        assert!(!finder.found_date);
+        assert!(!finder.found_time.get());
+        assert!(!finder.found_timestamp.get());
+        assert!(!finder.found_date.get());
     }
 }

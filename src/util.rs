@@ -19,6 +19,7 @@ use fs::File;
 use fs_err as fs;
 use object::{macho, read::archive::ArchiveFile, read::macho::FatArch};
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
 use std::hash::Hasher;
 use std::io::prelude::*;
@@ -137,9 +138,9 @@ pub const MAX_TIME_MACRO_HAYSTACK_LEN: usize = MAX_HAYSTACK_LEN;
 /// See `[Self::find_time_macros]` for details.
 #[derive(Debug, Default)]
 pub struct TimeMacroFinder {
-    pub found_date: bool,
-    pub found_time: bool,
-    pub found_timestamp: bool,
+    pub found_date: Cell<bool>,
+    pub found_time: Cell<bool>,
+    pub found_timestamp: Cell<bool>,
     overlap_buffer: [u8; MAX_HAYSTACK_LEN * 2],
     /// Counter of chunks of full size we've been through. Partial reads do
     /// not count and are handled separately.
@@ -204,7 +205,7 @@ impl TimeMacroFinder {
                 } else {
                     self.previous_small_read = visit.to_owned();
                 }
-                self.find_macros(&self.previous_small_read.to_owned());
+                self.find_macros(&self.previous_small_read);
                 return;
             }
             // Copy the right side of the visit to the left of the buffer
@@ -233,22 +234,22 @@ impl TimeMacroFinder {
                     .copy_from_slice(visit);
 
                 // Check both the concatenation with the previous small read
-                self.find_macros(&self.previous_small_read.to_owned());
+                self.find_macros(&self.previous_small_read);
                 // ...and the overlap buffer
-                self.find_macros(&self.overlap_buffer.clone());
+                self.find_macros(&self.overlap_buffer);
                 return;
             } else {
                 // Copy the left side of the visit to the right of the buffer
                 let left_half = MAX_HAYSTACK_LEN;
                 self.overlap_buffer[left_half..].copy_from_slice(&visit[..left_half]);
-                self.find_macros(&self.overlap_buffer.clone());
+                self.find_macros(&self.overlap_buffer);
                 // zero the buffer
                 self.overlap_buffer = Default::default();
                 // Copy the right side of the visit to the left of the buffer
                 let right_half = visit.len() - MAX_HAYSTACK_LEN;
                 self.overlap_buffer[..MAX_HAYSTACK_LEN].copy_from_slice(&visit[right_half..]);
             }
-            self.find_macros(&self.overlap_buffer.clone());
+            self.find_macros(&self.overlap_buffer);
         }
         // Also check the concatenation with the previous small read
         if !self.previous_small_read.is_empty() {
@@ -262,7 +263,7 @@ impl TimeMacroFinder {
         self.previous_small_read.clear();
     }
 
-    fn find_macros(&mut self, buffer: &[u8]) {
+    fn find_macros(&self, buffer: &[u8]) {
         // TODO
         // This could be made more efficient, either by using a regex for all
         // three patterns, or by doing some SIMD trickery like `ccache` does.
@@ -271,18 +272,18 @@ impl TimeMacroFinder {
         // winning in most cases... though they have an inode cache.
         // In any case, let's only improve this if it ends up being slow.
         if memchr::memmem::find(buffer, b"__TIMESTAMP__").is_some() {
-            self.found_timestamp = true;
+            self.found_timestamp.set(true);
         }
         if memchr::memmem::find(buffer, b"__TIME__").is_some() {
-            self.found_time = true;
+            self.found_time.set(true);
         };
         if memchr::memmem::find(buffer, b"__DATE__").is_some() {
-            self.found_date = true;
+            self.found_date.set(true);
         };
     }
 
     pub fn found_time_macros(&self) -> bool {
-        self.found_date || self.found_time || self.found_timestamp
+        self.found_date.get() || self.found_time.get() || self.found_timestamp.get()
     }
 
     pub fn new() -> Self {
@@ -968,77 +969,77 @@ mod tests {
         // Normal "read" should succeed
         let mut finder = TimeMacroFinder::new();
         finder.find_time_macros(b"__TIME__");
-        assert!(finder.found_time);
+        assert!(finder.found_time.get());
 
         // So should a partial "read"
         let mut finder = TimeMacroFinder::new();
         finder.find_time_macros(b"__");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"TIME__");
-        assert!(finder.found_time);
+        assert!(finder.found_time.get());
 
         // So should a partial "read" later down the line
         let mut finder = TimeMacroFinder::new();
         finder.find_time_macros(b"Something or other larger than the haystack");
         finder.find_time_macros(b"__");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"TIME__");
-        assert!(finder.found_time);
+        assert!(finder.found_time.get());
 
         // Even if the last "read" is large
         let mut finder = TimeMacroFinder::new();
         finder.find_time_macros(b"Something or other larger than the haystack");
         finder.find_time_macros(b"__");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"TIME__ something or other larger than the haystack");
-        assert!(finder.found_time);
+        assert!(finder.found_time.get());
 
         // Pathological case
         let mut finder = TimeMacroFinder::new();
         finder.find_time_macros(b"__");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"TI");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"ME");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"__");
-        assert!(finder.found_time);
+        assert!(finder.found_time.get());
 
         // Odd-numbered pathological case
         let mut finder = TimeMacroFinder::new();
         finder.find_time_macros(b"This is larger than the haystack __");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"TI");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"ME");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"__");
-        assert!(finder.found_time);
+        assert!(finder.found_time.get());
 
         // Sawtooth length pathological case
         let mut finder = TimeMacroFinder::new();
         finder.find_time_macros(b"This is larger than the haystack __");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"TI");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"ME__ This is larger than the haystack");
-        assert!(finder.found_time);
-        assert!(!finder.found_timestamp);
+        assert!(finder.found_time.get());
+        assert!(!finder.found_timestamp.get());
         finder.find_time_macros(b"__");
-        assert!(!finder.found_timestamp);
+        assert!(!finder.found_timestamp.get());
         finder.find_time_macros(b"TIMESTAMP__ This is larger than the haystack");
-        assert!(finder.found_timestamp);
+        assert!(finder.found_timestamp.get());
 
         // Odd-numbered sawtooth length pathological case
         let mut finder = TimeMacroFinder::new();
         finder.find_time_macros(b"__");
-        assert!(!finder.found_time);
+        assert!(!finder.found_time.get());
         finder.find_time_macros(b"TIME__ This is larger than the haystack");
-        assert!(finder.found_time);
-        assert!(!finder.found_timestamp);
+        assert!(finder.found_time.get());
+        assert!(!finder.found_timestamp.get());
         finder.find_time_macros(b"__");
-        assert!(!finder.found_timestamp);
+        assert!(!finder.found_timestamp.get());
         finder.find_time_macros(b"TIMESTAMP__ This is larger than the haystack");
-        assert!(finder.found_timestamp);
+        assert!(finder.found_timestamp.get());
     }
 }
